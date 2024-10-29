@@ -7,8 +7,8 @@ import torch
 class Logger:
     def __init__(self, path='./logs/', filename=''):
         t0 = datetime.datetime.now()
-        self.log_dir = '%s%s_%s/' % (path, t0, filename)
-        os.mkdir(self.log_dir)
+        self.log_dir = ('%s/%s_%s/' % (path, filename, t0)).replace(' ', '_')
+        os.makedirs(self.log_dir, exist_ok=True)
 
         self.log_file = self.log_dir + 'log'
 
