@@ -8,6 +8,7 @@ from backbones import LanguageModel, get_model
 from cf_datasets import get_tokenized_datasets
 from itertools import product
 from training import CustomTrainer, compute_metrics
+from approx import get_logits_from_text, get_cf_sample
 
 def get_args():
     parser = argparse.ArgumentParser()
@@ -69,32 +70,13 @@ if __name__ == "__main__":
     model, tokenizer = get_model(args.backbone, ckpt='../pretrain_models/%s' % args.backbone)
     model.eval()
 
-    def get_logits_from_text(model, tokenizer, sentences):
-        inputs = tokenizer(sentences, return_tensors='pt', padding=True, truncation=True)
-        # Get input_ids and attention mask
-        input_ids = inputs['input_ids']
-        attention_mask = inputs['attention_mask']
-
-        with torch.no_grad():
-            outputs = model(input_ids, attention_mask=attention_mask)
-        return outputs.logits
-
-    def get_cf_sample(concepts, current_concept, full_df, org_smaple):
-                        keep_concepts = [z for z in concepts if z != current_concept]
-                        diff_concepts = [current_concept] #['Candidate_id', c]
-                        matching_rows = full_df[(full_df[keep_concepts] == org_smaple[keep_concepts].values).all(axis=1)]
-                        valid_cf = matching_rows[(matching_rows[diff_concepts] != org_smaple[diff_concepts].values).all(axis=1)]
-                        if valid_cf.shape[0] == 0.0:
-                            print('No counterfactuals for %s->%s !!!!' % (org_concept, do_concept))
-                            return full_df.sample()
-                        else:
-                            return valid_cf.sample()
-
+    concepts = ['Gender', 'Education', 'Socioeconomic_Status', 'Age_group', 'Certificates', 'Volunteering', 'Race', 'Work_Experience_group']
+    text = 'CV_statement'
+    
+    metrics = {}
     if args.method == "approx":
-        metrics = {}    
-        # Eval ICaCE
-        concepts = ['Gender', 'Education', 'Socioeconomic_Status', 'Age_group', 'Certificates', 'Volunteering', 'Race', 'Work_Experience_group']
-        text = 'CV_statement'
+        
+        
         df = pd.read_csv('../datasets/cv_w_cf.csv')
         df_org = df[df['CF_on'] == 'ORG']
         
@@ -117,7 +99,7 @@ if __name__ == "__main__":
                     preds = get_logits_from_text(model, tokenizer, x_org[text].tolist())
 
                     x_cf = get_cf_sample(concepts, current_concept, cdf, x_org)
-                    cf_preds = get_logits_from_text(model, tokenizer, x_cf[text].tolist())
+                    cf_preds = get_logits_from_text(model, tokenizer, x_cf[text].tolist(), allways_return=True)
 
                     l2 = torch.norm(preds - cf_preds, p=2)
                     metrics[(current_concept, org_concept, do_concept)]['l2'].append(l2.item())
@@ -128,9 +110,17 @@ if __name__ == "__main__":
                     norm_diff = abs(torch.norm(preds) - torch.norm(cf_preds))
                     metrics[(current_concept ,org_concept, do_concept)]['norm_diff'].append(norm_diff.item())
                     
-        logger.log_object(metrics)
+        
                         
-                    
+    if args.method == "ConceptShap":
+        #use CE split to estimate model predictions
+        
+
+
+
+
+    logger.log_object(metrics)
+
 
 
 
