@@ -8,15 +8,51 @@ from backbones import LanguageModel, get_model
 from cf_datasets import get_tokenized_datasets
 from itertools import product
 from training import CustomTrainer, compute_metrics
+import torch.nn.functional as F
+# import sys
+# sys.path.append('..')
+from torch.utils.data import Dataset, DataLoader
+torch.manual_seed(42)
+torch.cuda.manual_seed_all(42)
+from tqdm import tqdm
+from dataloaders import tokenize_text, TokenizedDataset
+from tcav import *
+import prettytable as pt
+
+
 
 def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--backbone",type=str, choices=['gpt2', 'deberta'], default='gpt2')
-    parser.add_argument("--method",type=str, choices=['approx', 'train_model'], default='approx')
+    parser.add_argument("--method",type=str, choices=['approx', 'train_model', 'tcav'], default='approx')
     parser.add_argument("--log_file", type=str, default='')
+    parser.add_argument("--use_gpu", type=str, default='0')
+    parser.add_argument("--batch_size", type=int, default='2')
+
 
     args = parser.parse_args()
     return args
+
+def get_logits_from_text(model, tokenizer, sentences):
+    inputs = tokenizer(sentences, return_tensors='pt', padding=True, truncation=True)
+    # Get input_ids and attention mask
+    input_ids = inputs['input_ids']
+    attention_mask = inputs['attention_mask']
+
+    with torch.no_grad():
+        outputs = model(input_ids, attention_mask=attention_mask)
+    return outputs.logits
+
+def get_cf_sample(concepts, current_concept, full_df, org_smaple):
+    keep_concepts = [z for z in concepts if z != current_concept]
+    diff_concepts = [current_concept] #['Candidate_id', c]
+    matching_rows = full_df[(full_df[keep_concepts] == org_smaple[keep_concepts].values).all(axis=1)]
+    valid_cf = matching_rows[(matching_rows[diff_concepts] != org_smaple[diff_concepts].values).all(axis=1)]
+    if valid_cf.shape[0] == 0.0:
+        print('No counterfactuals for %s->%s !!!!' % (org_concept, do_concept))
+        return full_df.sample()
+    else:
+        return valid_cf.sample()
 
 
 if __name__ == "__main__":
@@ -26,7 +62,7 @@ if __name__ == "__main__":
 
     logger = Logger(path='../logs/%s_%s' % (args.method, args.backbone), filename = args.log_file)
     logger.log_object(args, 'args')
-    
+    device = "cuda:%s" % args.use_gpu
 
     model, tokenizer = get_model(args.backbone)
 
@@ -69,32 +105,20 @@ if __name__ == "__main__":
     model, tokenizer = get_model(args.backbone, ckpt='../pretrain_models/%s' % args.backbone)
     model.eval()
 
-    def get_logits_from_text(model, tokenizer, sentences):
-        inputs = tokenizer(sentences, return_tensors='pt', padding=True, truncation=True)
-        # Get input_ids and attention mask
-        input_ids = inputs['input_ids']
-        attention_mask = inputs['attention_mask']
+    # load data
+    data_path = "../datasets/"
+    df_train = pd.read_csv('%s/train.csv' % data_path)
+    df_test = pd.read_csv('%s/test.csv' % data_path)
+    df_estimate_cf = pd.read_csv('%s/estimate_cf.csv' % data_path)
+    df_cf = pd.read_csv('%s/cf.csv' % data_path)
 
-        with torch.no_grad():
-            outputs = model(input_ids, attention_mask=attention_mask)
-        return outputs.logits
-
-    def get_cf_sample(concepts, current_concept, full_df, org_smaple):
-                        keep_concepts = [z for z in concepts if z != current_concept]
-                        diff_concepts = [current_concept] #['Candidate_id', c]
-                        matching_rows = full_df[(full_df[keep_concepts] == org_smaple[keep_concepts].values).all(axis=1)]
-                        valid_cf = matching_rows[(matching_rows[diff_concepts] != org_smaple[diff_concepts].values).all(axis=1)]
-                        if valid_cf.shape[0] == 0.0:
-                            print('No counterfactuals for %s->%s !!!!' % (org_concept, do_concept))
-                            return full_df.sample()
-                        else:
-                            return valid_cf.sample()
+    concepts = ['Gender', 'Education', 'Socioeconomic_Status', 'Age_group', 'Certificates', 'Volunteering', 'Race', 'Work_Experience_group']
+    text = 'CV_statement'
 
     if args.method == "approx":
         metrics = {}    
         # Eval ICaCE
-        concepts = ['Gender', 'Education', 'Socioeconomic_Status', 'Age_group', 'Certificates', 'Volunteering', 'Race', 'Work_Experience_group']
-        text = 'CV_statement'
+        
         df = pd.read_csv('../datasets/cv_w_cf.csv')
         df_org = df[df['CF_on'] == 'ORG']
         
@@ -127,8 +151,57 @@ if __name__ == "__main__":
                     
                     norm_diff = abs(torch.norm(preds) - torch.norm(cf_preds))
                     metrics[(current_concept ,org_concept, do_concept)]['norm_diff'].append(norm_diff.item())
-                    
-        logger.log_object(metrics)
+        
+    if args.method == "tcav":
+        # Organize all dataloaders
+        train_dataset = TokenizedDataset(df_train, tokenizer)
+        train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+        estimate_cf_dataset = TokenizedDataset(df_estimate_cf, tokenizer)
+        estimate_cf_loader = DataLoader(estimate_cf_dataset, batch_size=1, shuffle=True)
+
+        concept_dict = {}
+        for c in concepts:
+            c_vals = df_train[c].unique()
+            for v in c_vals:
+                concept_dataset = TokenizedDataset(df_train[df_train[c] == v], tokenizer)
+                concept_dict['%s,%s' % (c,v)] = DataLoader(concept_dataset, batch_size=args.batch_size, shuffle=True)
+        
+
+        model = model.to(device)
+        extract_layer = 'transformer' #pass the name of the desired embedding layer. will use the first element of the layer.
+        wmodel = ModelWrapper(model, [extract_layer])
+        wmodel = wmodel.to(device)
+        wmodel.eval()
+        
+        scorer = TCAV(wmodel, estimate_cf_loader, concept_dict, df_train["Good_Employee"].unique(), 2, device)
+        print('Generating concepts...')
+        scorer.generate_activations([extract_layer])
+        scorer.load_activations()
+        print('Concepts successfully generated and loaded!')
+        
+        print('Calculating TCAV scores...')
+        scorer.generate_cavs(extract_layer)
+        scorer.calculate_tcav_score(extract_layer, '%s/tcav_result.npy' % logger.log_dir)
+        scores = np.load('%s/tcav_result.npy' % logger.log_dir)
+        scores = scores.T.tolist()
+    
+        table = pt.PrettyTable()
+        class_dict = {
+            'Bad': 0,
+            'Mid': 1,
+            'Good': 2
+        }
+        table.field_names = ['class'] + list(concept_dict.keys())
+        for i, k in enumerate(class_dict.keys()):
+            new_row = [k] + scores[i]
+            table.add_row(new_row)
+        print(table)
+        metrics = scores
+    
+    
+    
+    
+    logger.log_object(metrics)
                         
                     
 
