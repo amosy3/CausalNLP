@@ -20,6 +20,7 @@ from tcav import *
 import prettytable as pt
 
 
+from approx import get_logits_from_text, get_cf_sample
 
 def get_args():
     parser = argparse.ArgumentParser()
@@ -141,7 +142,7 @@ if __name__ == "__main__":
                     preds = get_logits_from_text(model, tokenizer, x_org[text].tolist())
 
                     x_cf = get_cf_sample(concepts, current_concept, cdf, x_org)
-                    cf_preds = get_logits_from_text(model, tokenizer, x_cf[text].tolist())
+                    cf_preds = get_logits_from_text(model, tokenizer, x_cf[text].tolist(), allways_return=True)
 
                     l2 = torch.norm(preds - cf_preds, p=2)
                     metrics[(current_concept, org_concept, do_concept)]['l2'].append(l2.item())
@@ -203,7 +204,15 @@ if __name__ == "__main__":
     
     logger.log_object(metrics)
                         
-                    
+    if args.method == "ConceptShap":
+        #use CE split to estimate model predictions
+        
+
+
+
+
+    logger.log_object(metrics)
+
 
 
 
