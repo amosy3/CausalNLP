@@ -202,9 +202,10 @@ if __name__ == "__main__":
     
     
     
-    logger.log_object(metrics)
+    # logger.log_object(metrics)
                         
     if args.method == "ConceptShap":
+        pass
         #use CE split to estimate model predictions
         
 
