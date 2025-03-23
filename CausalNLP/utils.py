@@ -6,7 +6,7 @@ import torch
 
 class Logger:
     def __init__(self, path='./logs/', filename=''):
-        t0 = datetime.datetime.now()
+        t0 = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         self.log_dir = ('%s/%s_%s/' % (path, filename, t0)).replace(' ', '_')
         os.makedirs(self.log_dir, exist_ok=True)
 
@@ -14,6 +14,8 @@ class Logger:
 
         os.mkdir(self.log_dir + 'checkpoints/')
         self.log_models = self.log_dir + 'checkpoints/'
+
+        print('Log directory created at %s' % self.log_dir)
 
     def print_and_log(self, txt, just_log=False):
         t0 = datetime.datetime.now()

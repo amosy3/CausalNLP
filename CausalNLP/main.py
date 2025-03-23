@@ -3,7 +3,7 @@ from transformers import Trainer, TrainingArguments
 import torch
 from torch import nn
 import argparse
-from utils import Logger
+from utils import Logger, save_object, load_object
 from backbones import LanguageModel, get_model
 from cf_datasets import get_tokenized_datasets
 from itertools import product
@@ -18,17 +18,23 @@ from tqdm import tqdm
 from dataloaders import tokenize_text, TokenizedDataset
 from tcav import *
 import prettytable as pt
-
+import h5py
+import numpy as np
+import os
+from glob import glob
+from concept_shap import *
 
 from approx import get_logits_from_text, get_cf_sample
 
 def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--backbone",type=str, choices=['gpt2', 'deberta'], default='gpt2')
-    parser.add_argument("--method",type=str, choices=['approx', 'train_model', 'tcav'], default='approx')
+    parser.add_argument("--method",type=str, choices=['approx', 'train_model', 'tcav', 'ConceptShap'], default='approx')
     parser.add_argument("--log_file", type=str, default='')
+    parser.add_argument("--dataset", choices=['cv'], default='cv')
     parser.add_argument("--use_gpu", type=str, default='0')
     parser.add_argument("--batch_size", type=int, default='2')
+    parser.add_argument("--load_from_dir",type=str, default='../logs/cv_tcav_gpt2/test_logs_2025-03-23_13-03-33')
 
 
     args = parser.parse_args()
@@ -59,9 +65,9 @@ def get_cf_sample(concepts, current_concept, full_df, org_smaple):
 if __name__ == "__main__":
     args = get_args()
 
-    print("Running! We now us %s for %s" % (args.backbone, args.method))
+    print("Running! We now use %s for %s on %s dataset" % (args.backbone, args.method, args.dataset))
 
-    logger = Logger(path='../logs/%s_%s' % (args.method, args.backbone), filename = args.log_file)
+    logger = Logger(path='../logs/%s_%s_%s' % (args.dataset, args.method, args.backbone), filename = args.log_file)
     logger.log_object(args, 'args')
     device = "cuda:%s" % args.use_gpu
 
@@ -174,7 +180,7 @@ if __name__ == "__main__":
         wmodel = wmodel.to(device)
         wmodel.eval()
         
-        scorer = TCAV(wmodel, estimate_cf_loader, concept_dict, df_train["Good_Employee"].unique(), 2, device)
+        scorer = TCAV(wmodel, estimate_cf_loader, concept_dict, df_train["Good_Employee"].unique(), 2, device, logger.log_dir)
         print('Generating concepts...')
         scorer.generate_activations([extract_layer])
         scorer.load_activations()
@@ -182,6 +188,7 @@ if __name__ == "__main__":
         
         print('Calculating TCAV scores...')
         scorer.generate_cavs(extract_layer)
+        # For now ther is an exit command because all gradients are zero!!!
         scorer.calculate_tcav_score(extract_layer, '%s/tcav_result.npy' % logger.log_dir)
         scores = np.load('%s/tcav_result.npy' % logger.log_dir)
         scores = scores.T.tolist()
@@ -198,21 +205,136 @@ if __name__ == "__main__":
             table.add_row(new_row)
         print(table)
         metrics = scores
-    
-    
-    
-    
     # logger.log_object(metrics)
                         
     if args.method == "ConceptShap":
-        pass
-        #use CE split to estimate model predictions
-        
+
+        train_dataset = TokenizedDataset(df_train, tokenizer)
+        train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+
+        estimate_cf_dataset = TokenizedDataset(df_estimate_cf, tokenizer)
+        estimate_cf_loader = DataLoader(estimate_cf_dataset, batch_size=args.batch_size, shuffle=True)
+
+        cavs = load_object('%s/embeddings/cavs.pkl' % args.load_from_dir)
+        cavs_names = load_object('%s/embeddings/cavs_names.pkl' % args.load_from_dir)
+
+        # Create concept space for projection        
+        concepts_matrix = torch.from_numpy(cavs)
+        concepts_matrix = concepts_matrix.T
+        proj_matrix = (concepts_matrix @ torch.inverse((concepts_matrix.T @ concepts_matrix))) \
+                      @ concepts_matrix.T
+
+        proj_matrix = proj_matrix.to(device)
+
+        # Optimize prediction from the concept space
+        h_x = list(model.modules())[-1]
+        g = G(768,768,768)
+        model = model.to(device)
+        g = g.to(device)
+        model.float()
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
+
+        for i in range(10):
+            running_loss = 0.0
+            for X, y in train_loader:
+                X = X.to(device)
+                with torch.no_grad():
+                    outputs = model(**X, output_hidden_states=True)
+                X_embedding = outputs.hidden_states[-1][:,0,:] #Represent samples as embeddings - (batch_size x embedding_dim) = (2,768)
+                x = proj_matrix @ X_embedding.T #progect embedding to concept space - (embedding_dim x batch_size) = (768,2)
+                x = g(x.T) #learn a mapping (g) that maximize the performance - (batch_size x embedding_dim)
+                pred = h_x(x) #feed to original last layer - (batch_size x 3) = (2,3)
+            
+                y = y.to(torch.long)
+                y = F.one_hot(y, num_classes=3).to(device).float()
+                loss = F.binary_cross_entropy_with_logits(pred, y)
+            
+                # Optimization step
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                running_loss += loss.item()
+            print('Epoch: %s Cross entropy loss = %s' % (i,running_loss))    
+
+        concept2idx = dict()
+        for c in concepts:
+            concept2idx[c] = [i for (i,n) in enumerate(cavs_names) if c in n]
+
+        for tested_concept in concepts:
+            exclude = [x for x in concepts if x != tested_concept]
+            subsets = list(powerset(list(exclude)))
+            sum = 0
+            for subset in subsets[3:]:
+                # score 1:
+                concept_name_list = subset + [tested_concept]
+                nested_indices = [concept2idx[concept_name] for concept_name in concept_name_list]
+                indices = sorted(list(chain(*nested_indices)))
+                index_tensor = torch.tensor(indices, dtype=torch.long)
+                filtered_concepts_matrix = concepts_matrix[:,index_tensor]
+                proj_matrix = (filtered_concepts_matrix @ torch.inverse((filtered_concepts_matrix.T @ filtered_concepts_matrix))) \
+                        @ filtered_concepts_matrix.T
+                
+                y_gt, y_pred, y_prec_from_concepts = [], [], []
+                for X, y in estimate_cf_loader:
+                    X, y = X.to(device), y.to(device)
+                    proj_matrix = proj_matrix.to(device)
+                    with torch.no_grad():
+                        outputs = model(**X, output_hidden_states=True)
+                    X_embedding = outputs.hidden_states[-1][:,0,:] #Represent samples as embeddings - (batch_size x embedding_dim) = (2,768)
+                    x = proj_matrix @ X_embedding.T #progect embedding to concept space - (embedding_dim x batch_size) = (768,2)
+                    x = g(x.T) #learn a mapping (g) that maximize the performance - (batch_size x embedding_dim)
+                    pred = h_x(x) #feed to original last layer - (batch_size x 3) = (2,3)
+
+                    
+                    y_gt += y
+                    y_pred += torch.argmax(outputs['logits'], axis=1)
+                    y_prec_from_concepts += torch.argmax(pred, axis=1)
+                
+                y_gt, y_pred, y_prec_from_concepts = torch.stack(y_gt).int(), torch.stack(y_pred).int(), torch.stack(y_prec_from_concepts).int()
+                score1 = n(y_gt, y_pred, y_prec_from_concepts, outputs['logits'].shape[1])
+
+
+                # score 2:
+                concept_name_list = subset
+                if concept_name_list == []:
+                    score2 = torch.tensor(0)
+                else:
+                    nested_indices = [concept2idx[concept_name] for concept_name in concept_name_list]
+                    indices = sorted(list(chain(*nested_indices)))
+                    index_tensor = torch.tensor(indices, dtype=torch.long)
+                    filtered_concepts_matrix = concepts_matrix[:,index_tensor]
+                    proj_matrix = (filtered_concepts_matrix @ torch.inverse((filtered_concepts_matrix.T @ filtered_concepts_matrix))) \
+                            @ filtered_concepts_matrix.T
+                    
+                    y_gt, y_pred, y_prec_from_concepts = [], [], []
+                    for X, y in estimate_cf_loader:
+                        X, y = X.to(device), y.to(device)
+                        proj_matrix = proj_matrix.to(device)
+                        with torch.no_grad():
+                            outputs = model(**X, output_hidden_states=True)
+                        X_embedding = outputs.hidden_states[-1][:,0,:] #Represent samples as embeddings - (batch_size x embedding_dim) = (2,768)
+                        x = proj_matrix @ X_embedding.T #progect embedding to concept space - (embedding_dim x batch_size) = (768,2)
+                        x = g(x.T) #learn a mapping (g) that maximize the performance - (batch_size x embedding_dim)
+                        pred = h_x(x) #feed to original last layer - (batch_size x 3) = (2,3)
+            
+                        
+                        y_gt += y
+                        y_pred += torch.argmax(outputs['logits'], axis=1)
+                        y_prec_from_concepts += torch.argmax(pred, axis=1)
+                    
+                    y_gt, y_pred, y_prec_from_concepts = torch.stack(y_gt).int(), torch.stack(y_pred).int(), torch.stack(y_prec_from_concepts).int()
+                    score2 = n(y_gt, y_pred, y_prec_from_concepts, outputs['logits'].shape[1])
 
 
 
+                norm = (math.factorial(len(concepts) - len(subset) - 1) * math.factorial(len(subset))) / \
+                                math.factorial(len(concepts))
+                sum += norm * (score1.data.item() - score2.data.item())
+                
+            print(tested_concept, sum)
+    
 
-    logger.log_object(metrics)
+    # logger.log_object(metrics)
 
 
 

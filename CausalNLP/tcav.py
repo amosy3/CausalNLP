@@ -9,7 +9,7 @@ from torch import nn
 from sklearn.linear_model import SGDClassifier, LogisticRegression
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
-
+from utils import save_object
 
 class ModelWrapper(nn.Module):#object):
     def __init__(self, model, layers):
@@ -17,11 +17,12 @@ class ModelWrapper(nn.Module):#object):
         # self.model = deepcopy(model)
         self.model = model
         self.intermediate_activations = {}
+        self.gradients = None
 
         def save_activation(name):
             '''create specific hook by module name'''
             def hook(module, input, output): #This hook is activated!
-                self.intermediate_activations[name] = output['last_hidden_state']#[:,0,:] - 
+                self.intermediate_activations[name] = output['last_hidden_state'].requires_grad_(True)
             return hook
 
         for name, module in self.model._modules.items(): #_modules.items(): named_modules():
@@ -34,7 +35,7 @@ class ModelWrapper(nn.Module):#object):
 
     def generate_gradients(self, c, layer_name):
         activation = self.intermediate_activations[layer_name]
-        activation.register_hook(self.save_gradient) #This hook is *not* activated!!!!!!
+        activation.register_hook(self.save_gradient) 
         logit = self.output['logits'][:, c]
         logit.backward(torch.ones_like(logit), retain_graph=True)
         # gradients = grad(logit, activation, retain_graph=True)[0]
@@ -100,12 +101,12 @@ def load_activations(path):
     return activations
 
 class TCAV(object):
-    def __init__(self, wmodel, input_dataloader, concept_dataloaders, class_list, max_samples, device):
+    def __init__(self, wmodel, input_dataloader, concept_dataloaders, class_list, max_samples, device, logdir):
         self.model = wmodel
         self.input_dataloader = input_dataloader
         self.concept_dataloaders = concept_dataloaders
         self.concepts = list(concept_dataloaders.keys())
-        self.output_dir = '../embeddings/'
+        self.output_dir = '%s/embeddings/' % logdir
         self.max_samples = max_samples
         self.lr = 1e-3
         self.model_type = 'logistic'
@@ -126,6 +127,8 @@ class TCAV(object):
         cav_trainer = CAV(self.concepts, layer_name, self.lr, self.model_type)
         cav_trainer.train(self.activations)
         self.cavs = cav_trainer.get_cav()
+        save_object(self.cavs, self.output_dir + 'cavs.pkl')
+        save_object(self.concepts, self.output_dir + 'cavs_names.pkl')
 
     def calculate_tcav_score(self, layer_name, output_path):
         self.scores = np.zeros((self.cavs.shape[0], len(self.class_list)))
@@ -209,7 +212,27 @@ def tcav_score(model, data_loader, cav, layer_name, class_list, concept, device)
         outputs = model(x)
         k = int(outputs['logits'].max(dim=1)[1].clone().detach().cpu().numpy())
         if k in class_list:
-            derivatives[k].append(directional_derivative(model, cav, layer_name, k))
+            # derivatives[k].append(directional_derivative(model, cav, layer_name, k))
+
+            ############################
+            print("Activations:", model.intermediate_activations)
+            print("Gradients:", model.gradients)
+
+            for name, activation in model.intermediate_activations.items():
+                activation.register_hook(model.save_gradient)
+
+            logit = outputs['logits'][:, k]
+            logit.backward(10*torch.ones_like(logit), retain_graph=True)
+
+            print("Grads: ", model.gradients.shape, model.gradients)
+            exit()
+            gradients = model.gradients.cpu().detach().numpy()
+            gradients = gradients.reshape(-1)
+            gradient = np.dot(gradients, cav) < 0 
+            derivatives[k].append(gradient)
+            
+            # ###########################3
+
 
     score = np.zeros(len(class_list))
     for i, k in enumerate(class_list):
