@@ -31,7 +31,7 @@ def get_args():
     parser.add_argument("--backbone",type=str, choices=['gpt2', 'deberta'], default='gpt2')
     parser.add_argument("--method",type=str, choices=['approx', 'train_model', 'tcav', 'ConceptShap'], default='approx')
     parser.add_argument("--log_file", type=str, default='')
-    parser.add_argument("--dataset", choices=['cv'], default='cv')
+    parser.add_argument("--dataset", choices=['cv', 'disease', 'violence'], default='cv')
     parser.add_argument("--use_gpu", type=str, default='0')
     parser.add_argument("--batch_size", type=int, default='2')
     parser.add_argument("--load_from_dir",type=str, default='../logs/cv_tcav_gpt2/test_logs_2025-03-23_13-03-33')
@@ -113,14 +113,28 @@ if __name__ == "__main__":
     model.eval()
 
     # load data
-    data_path = "../datasets/"
+    data_path = "../datasets/%s" % args.dataset
     df_train = pd.read_csv('%s/train.csv' % data_path)
     df_test = pd.read_csv('%s/test.csv' % data_path)
     df_estimate_cf = pd.read_csv('%s/estimate_cf.csv' % data_path)
     df_cf = pd.read_csv('%s/cf.csv' % data_path)
 
-    concepts = ['Gender', 'Education', 'Socioeconomic_Status', 'Age_group', 'Certificates', 'Volunteering', 'Race', 'Work_Experience_group']
-    text = 'CV_statement'
+    if args.dataset == 'cv':
+        concepts = ['Gender', 'Education', 'Socioeconomic_Status', 'Age_group', 'Certificates', 'Volunteering', 'Race', 'Work_Experience_group']
+        text = 'CV_statement'
+    
+    elif args.dataset == 'disease':
+        concepts = ['Migraine', 'Sinusitis', 'Influenza', 'Dizzy', 'Sensitivity_to_Light','Headache','Nasal_Congestion', 
+                    'Facial_Pain_Pressure','Fever','General_Weakness', 'Golden_Label']
+        text = 'Patient_consultation'
+    
+    elif  args.dataset == 'violence':
+        concepts = ['Gender', 'Age_group', 'Race', 'Years_As_Nurse', 'License_Type', 'Department','Activity_At_Work', 'Violence']
+        text = 'Dialogue'
+    
+    else:
+        raise ValueError('Could not find dataset info')
+
 
     if args.method == "approx":
         metrics = {}    
