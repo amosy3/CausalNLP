@@ -1,9 +1,9 @@
 Create Concept Activation Vectors (CAVs):
 '''
-python main.py --use_gpu=1 --method=tcav --log_file='test_logs'
+python main.py --method=tcav --dataset=cv --backbone=gpt2 --log_file=full  
 '''
 
 Run ConceptShap using the CAVs:
 '''
-python main.py --use_gpu=1 --method=ConceptShap --load_from_dir='test_logs'
+python main.py --use_gpu=1 --method=ConceptShap --dataset=cv --backbone=gpt2 --load_from_dir='full_2025-06-11_10-41-23'
 '''
