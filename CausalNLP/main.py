@@ -28,7 +28,7 @@ from approx import get_logits_from_text, get_cf_sample
 
 def get_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--backbone",type=str, choices=['gpt2', 'deberta'], default='gpt2')
+    parser.add_argument("--backbone",type=str, choices=['gpt2', 'deberta', 'qwen','t5'], default='gpt2')
     parser.add_argument("--method",type=str, choices=['approx', 'train_model', 'tcav', 'ConceptShap'], default='approx')
     parser.add_argument("--log_file", type=str, default='')
     parser.add_argument("--dataset", choices=['cv', 'disease', 'violence'], default='cv')
@@ -116,20 +116,19 @@ if __name__ == "__main__":
     data_path = "../datasets/%s" % args.dataset
     df_train = pd.read_csv('%s/train.csv' % data_path)
     df_test = pd.read_csv('%s/test.csv' % data_path)
-    df_estimate_cf = pd.read_csv('%s/estimate_cf.csv' % data_path)
-    df_cf = pd.read_csv('%s/cf.csv' % data_path)
+    df_estimate_cf = pd.read_csv('%s/wo_f.csv' % data_path)
+    df_cf = pd.read_csv('%s/w_cf.csv' % data_path)
 
     if args.dataset == 'cv':
         concepts = ['Gender', 'Education', 'Socioeconomic_Status', 'Age_group', 'Certificates', 'Volunteering', 'Race', 'Work_Experience_group']
         text = 'CV_statement'
     
     elif args.dataset == 'disease':
-        concepts = ['Migraine', 'Sinusitis', 'Influenza', 'Dizzy', 'Sensitivity_to_Light','Headache','Nasal_Congestion', 
-                    'Facial_Pain_Pressure','Fever','General_Weakness', 'Golden_Label']
+        concepts = ['Dizzy', 'Sensitivity_to_Light','Headache','Nasal_Congestion', 'Facial_Pain_Pressure','Fever','General_Weakness']
         text = 'Patient_consultation'
     
     elif  args.dataset == 'violence':
-        concepts = ['Gender', 'Age_group', 'Race', 'Years_As_Nurse', 'License_Type', 'Department','Activity_At_Work', 'Violence']
+        concepts = ['Gender', 'Age_group', 'Race', 'Years_As_Nurse', 'License_Type', 'Department','Activity_At_Work']
         text = 'Dialogue'
     
     else:
@@ -229,8 +228,9 @@ if __name__ == "__main__":
         estimate_cf_dataset = TokenizedDataset(df_estimate_cf, tokenizer)
         estimate_cf_loader = DataLoader(estimate_cf_dataset, batch_size=args.batch_size, shuffle=True)
 
-        cavs = load_object('%s/embeddings/cavs.pkl' % args.load_from_dir)
-        cavs_names = load_object('%s/embeddings/cavs_names.pkl' % args.load_from_dir)
+        logfile_location = '../logs/%s_tcav_%s' % (args.dataset, args.backbone)
+        cavs = load_object('%s/%s/embeddings/cavs.pkl' % (logfile_location, args.load_from_dir))
+        cavs_names = load_object('%s/%s/embeddings/cavs_names.pkl' % (logfile_location, args.load_from_dir))
 
         # Create concept space for projection        
         concepts_matrix = torch.from_numpy(cavs)
