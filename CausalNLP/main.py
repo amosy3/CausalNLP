@@ -122,6 +122,7 @@ if __name__ == "__main__":
     if args.dataset == 'cv':
         concepts = ['Gender', 'Education', 'Socioeconomic_Status', 'Age_group', 'Certificates', 'Volunteering', 'Race', 'Work_Experience_group']
         text = 'CV_statement'
+        num_classes = 3
     
     elif args.dataset == 'disease':
         concepts = ['Dizzy', 'Sensitivity_to_Light','Headache','Nasal_Congestion', 'Facial_Pain_Pressure','Fever','General_Weakness']
@@ -188,8 +189,13 @@ if __name__ == "__main__":
         
 
         model = model.to(device)
-        extract_layer = 'transformer' #pass the name of the desired embedding layer. will use the first element of the layer.
-        wmodel = ModelWrapper(model, [extract_layer])
+        #pass the name of the desired embedding layer. will use the first element of the layer.
+        if args.backbone == 'gpt2':
+            extract_layer = 'transformer' 
+        elif args.backbone == 't5':
+            extract_layer = 'encoder.block.11' 
+        
+        wmodel = ModelWrapper(model, [extract_layer], backbone=args.backbone)
         wmodel = wmodel.to(device)
         wmodel.eval()
         
@@ -240,27 +246,50 @@ if __name__ == "__main__":
 
         proj_matrix = proj_matrix.to(device)
 
+        
         # Optimize prediction from the concept space
-        h_x = list(model.modules())[-1]
         g = G(768,768,768)
-        model = model.to(device)
         g = g.to(device)
+        
+        if args.backbone == 't5':
+            h_x = torch.nn.Linear(proj_matrix.shape[0], num_classes).to(device)
+            optimizer = torch.optim.Adam(list(g.parameters()) + list(h_x.parameters()), lr=0.0001)
+        elif args.backbone == 'gpt2':
+            h_x = list(model.modules())[-1]
+            optimizer = torch.optim.Adam(g.parameters(), lr=0.0001)
+        else:
+            raise Exception("Backbone does not recognized!")
+
+        model = model.to(device)        
         model.float()
-        optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
+        
 
         for i in range(10):
             running_loss = 0.0
             for X, y in train_loader:
                 X = X.to(device)
-                with torch.no_grad():
-                    outputs = model(**X, output_hidden_states=True)
-                X_embedding = outputs.hidden_states[-1][:,0,:] #Represent samples as embeddings - (batch_size x embedding_dim) = (2,768)
+
+
+                if args.backbone == 't5':
+                    with torch.no_grad():
+                        encoder_outputs = model.encoder(
+                            input_ids=X['input_ids'],
+                            attention_mask=X.get('attention_mask'),
+                            output_hidden_states=True,
+                            return_dict=True
+                        )
+                    X_embedding = encoder_outputs[0][:,0,:] #Represent samples as embeddings - (batch_size x embedding_dim) = (2,768)
+                else:
+                    with torch.no_grad():
+                        outputs = model(**X, output_hidden_states=True)
+                    X_embedding = outputs.hidden_states[-1][:,0,:] #Represent samples as embeddings - (batch_size x embedding_dim) = (2,768)
+
                 x = proj_matrix @ X_embedding.T #progect embedding to concept space - (embedding_dim x batch_size) = (768,2)
                 x = g(x.T) #learn a mapping (g) that maximize the performance - (batch_size x embedding_dim)
                 pred = h_x(x) #feed to original last layer - (batch_size x 3) = (2,3)
-            
+
                 y = y.to(torch.long)
-                y = F.one_hot(y, num_classes=3).to(device).float()
+                y = F.one_hot(y, num_classes=num_classes).to(device).float()
                 loss = F.binary_cross_entropy_with_logits(pred, y)
             
                 # Optimization step
@@ -292,9 +321,23 @@ if __name__ == "__main__":
                 for X, y in estimate_cf_loader:
                     X, y = X.to(device), y.to(device)
                     proj_matrix = proj_matrix.to(device)
-                    with torch.no_grad():
-                        outputs = model(**X, output_hidden_states=True)
-                    X_embedding = outputs.hidden_states[-1][:,0,:] #Represent samples as embeddings - (batch_size x embedding_dim) = (2,768)
+
+                    if args.backbone == 't5':
+                        with torch.no_grad():
+                            encoder_outputs = model.encoder(
+                                input_ids=X['input_ids'],
+                                attention_mask=X.get('attention_mask'),
+                                output_hidden_states=True,
+                                return_dict=True
+                            )
+                        X_embedding = encoder_outputs[0][:,0,:] #Represent samples as embeddings - (batch_size x embedding_dim) = (2,768)
+                    elif args.backbone == 'gpt2':
+                        with torch.no_grad():
+                            outputs = model(**X, output_hidden_states=True)
+                        X_embedding = outputs.hidden_states[-1][:,0,:] #Represent samples as embeddings - (batch_size x embedding_dim) = (2,768)
+                    else:
+                        raise Exception("Backbone does not recognized!")
+
                     x = proj_matrix @ X_embedding.T #progect embedding to concept space - (embedding_dim x batch_size) = (768,2)
                     x = g(x.T) #learn a mapping (g) that maximize the performance - (batch_size x embedding_dim)
                     pred = h_x(x) #feed to original last layer - (batch_size x 3) = (2,3)
@@ -324,9 +367,23 @@ if __name__ == "__main__":
                     for X, y in estimate_cf_loader:
                         X, y = X.to(device), y.to(device)
                         proj_matrix = proj_matrix.to(device)
-                        with torch.no_grad():
-                            outputs = model(**X, output_hidden_states=True)
-                        X_embedding = outputs.hidden_states[-1][:,0,:] #Represent samples as embeddings - (batch_size x embedding_dim) = (2,768)
+
+                        if args.backbone == 't5':
+                            with torch.no_grad():
+                                encoder_outputs = model.encoder(
+                                    input_ids=X['input_ids'],
+                                    attention_mask=X.get('attention_mask'),
+                                    output_hidden_states=True,
+                                    return_dict=True
+                                )
+                            X_embedding = encoder_outputs[0][:,0,:] #Represent samples as embeddings - (batch_size x embedding_dim) = (2,768)
+                        elif args.backbone == 'gpt2':
+                            with torch.no_grad():
+                                outputs = model(**X, output_hidden_states=True)
+                            X_embedding = outputs.hidden_states[-1][:,0,:] #Represent samples as embeddings - (batch_size x embedding_dim) = (2,768)
+                        else:
+                            raise Exception("Backbone does not recognized!")
+
                         x = proj_matrix @ X_embedding.T #progect embedding to concept space - (embedding_dim x batch_size) = (768,2)
                         x = g(x.T) #learn a mapping (g) that maximize the performance - (batch_size x embedding_dim)
                         pred = h_x(x) #feed to original last layer - (batch_size x 3) = (2,3)
@@ -345,7 +402,8 @@ if __name__ == "__main__":
                                 math.factorial(len(concepts))
                 sum += norm * (score1.data.item() - score2.data.item())
                 
-            print(tested_concept, sum)
+            # print(tested_concept, sum)
+            logger.print_and_log(tested_concept, sum)
     
 
     # logger.log_object(metrics)
