@@ -62,6 +62,46 @@ def get_cf_sample(concepts, current_concept, full_df, org_smaple):
         return valid_cf.sample()
 
 
+def t5_get_class_probs(output, tokenizer, class_mapping):
+    """
+    Extract class probabilities from a T5 generate() output,
+    assuming labels are single-token words.
+
+    Args:
+        output: the result of model.generate(..., return_dict_in_generate=True, output_scores=True)
+        tokenizer: the tokenizer used with the T5 model
+        class_mapping: dict mapping class names to indices, e.g. {"Regular": 0, "Good": 1, "Exceptional": 2}
+
+    Returns:
+        predicted_probs: Tensor of shape [batch_size, num_classes]
+                         Each row corresponds to probabilities in the class index order.
+    """
+
+    # Validate and get token ID for each class label
+    label_token_ids = {}
+    for label in class_mapping:
+        token_ids = tokenizer(label, add_special_tokens=False)["input_ids"]
+        # if len(token_ids) != 1:
+        #     raise ValueError(f"Label '{label}' must be a single token. Got tokens: {token_ids}")
+        # print(label, token_ids)
+        label_token_ids[label] = token_ids[0]
+
+    # Get logits of the first generated token
+    logits = output.scores[0]  # shape: (batch_size, vocab_size)
+    probs = F.softmax(logits, dim=-1)  # shape: (batch_size, vocab_size)
+
+    batch_size = logits.size(0)
+    num_classes = len(class_mapping)
+    predicted_probs = torch.zeros(batch_size, num_classes, device=logits.device)
+
+    # Fill probability tensor according to class index order
+    for label, class_idx in class_mapping.items():
+        token_id = label_token_ids[label]
+        predicted_probs[:, class_idx] = probs[:, token_id]
+
+    return predicted_probs
+
+
 if __name__ == "__main__":
     args = get_args()
 
@@ -122,16 +162,24 @@ if __name__ == "__main__":
     if args.dataset == 'cv':
         concepts = ['Gender', 'Education', 'Socioeconomic_Status', 'Age_group', 'Certificates', 'Volunteering', 'Race', 'Work_Experience_group']
         text = 'CV_statement'
+        target = 'Good_Employee'
+        class_mapping = {"Regular": 0, "Good": 1, "Exceptional": 2}
         num_classes = 3
+            
     
     elif args.dataset == 'disease':
         concepts = ['Dizzy', 'Sensitivity_to_Light','Headache','Nasal_Congestion', 'Facial_Pain_Pressure','Fever','General_Weakness']
         text = 'Patient_consultation'
-    
+        class_mapping = {"": 0, "1": 1, "2": 2}
+        num_classes = 3
+
+
     elif  args.dataset == 'violence':
         concepts = ['Gender', 'Age_group', 'Race', 'Years_As_Nurse', 'License_Type', 'Department','Activity_At_Work']
         text = 'Dialogue'
-    
+        class_mapping = {"No": 0, "Verb": 1, "Physical": 2}
+        num_classes = 3
+
     else:
         raise ValueError('Could not find dataset info')
 
@@ -175,9 +223,9 @@ if __name__ == "__main__":
         
     if args.method == "tcav":
         # Organize all dataloaders
-        train_dataset = TokenizedDataset(df_train, tokenizer)
+        train_dataset = TokenizedDataset(df_train, tokenizer, text, target, model=args.backbone)
         train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
-        estimate_cf_dataset = TokenizedDataset(df_estimate_cf, tokenizer)
+        estimate_cf_dataset = TokenizedDataset(df_estimate_cf, tokenizer, text, target,model=args.backbone)
         estimate_cf_loader = DataLoader(estimate_cf_dataset, batch_size=1, shuffle=True)
 
         concept_dict = {}
@@ -228,10 +276,10 @@ if __name__ == "__main__":
                         
     if args.method == "ConceptShap":
 
-        train_dataset = TokenizedDataset(df_train, tokenizer)
+        train_dataset = TokenizedDataset(df_train, tokenizer, text, target, model=args.backbone)
         train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
 
-        estimate_cf_dataset = TokenizedDataset(df_estimate_cf, tokenizer)
+        estimate_cf_dataset = TokenizedDataset(df_estimate_cf, tokenizer, text, target, model=args.backbone)
         estimate_cf_loader = DataLoader(estimate_cf_dataset, batch_size=args.batch_size, shuffle=True)
 
         logfile_location = '../logs/%s_tcav_%s' % (args.dataset, args.backbone)
@@ -266,7 +314,7 @@ if __name__ == "__main__":
 
         for i in range(10):
             running_loss = 0.0
-            for X, y in train_loader:
+            for X, y in tqdm(train_loader):
                 X = X.to(device)
 
 
@@ -330,11 +378,22 @@ if __name__ == "__main__":
                                 output_hidden_states=True,
                                 return_dict=True
                             )
-                        X_embedding = encoder_outputs[0][:,0,:] #Represent samples as embeddings - (batch_size x embedding_dim) = (2,768)
+                        X_embedding = encoder_outputs[0][:,0,:]
+                        
+                        with torch.no_grad():
+                            output = model.generate(input_ids=X['input_ids'],
+                                    attention_mask=X.get('attention_mask').squeeze(1),
+                                    return_dict_in_generate=True,
+                                    output_scores=True,
+                                    max_length=10)
+                            
+                            predicted_probs = t5_get_class_probs(output, tokenizer, class_mapping)
+                            
                     elif args.backbone == 'gpt2':
                         with torch.no_grad():
                             outputs = model(**X, output_hidden_states=True)
                         X_embedding = outputs.hidden_states[-1][:,0,:] #Represent samples as embeddings - (batch_size x embedding_dim) = (2,768)
+                        predicted_probs = outputs['logits']
                     else:
                         raise Exception("Backbone does not recognized!")
 
@@ -344,11 +403,11 @@ if __name__ == "__main__":
 
                     
                     y_gt += y
-                    y_pred += torch.argmax(outputs['logits'], axis=1)
+                    y_pred += torch.argmax(predicted_probs, axis=1)
                     y_prec_from_concepts += torch.argmax(pred, axis=1)
                 
                 y_gt, y_pred, y_prec_from_concepts = torch.stack(y_gt).int(), torch.stack(y_pred).int(), torch.stack(y_prec_from_concepts).int()
-                score1 = n(y_gt, y_pred, y_prec_from_concepts, outputs['logits'].shape[1])
+                score1 = n(y_gt, y_pred, y_prec_from_concepts, predicted_probs.shape[1])
 
 
                 # score 2:
@@ -376,11 +435,22 @@ if __name__ == "__main__":
                                     output_hidden_states=True,
                                     return_dict=True
                                 )
-                            X_embedding = encoder_outputs[0][:,0,:] #Represent samples as embeddings - (batch_size x embedding_dim) = (2,768)
+                            X_embedding = encoder_outputs[0][:,0,:]
+                        
+                            with torch.no_grad():
+                                output = model.generate(input_ids=X['input_ids'],
+                                        attention_mask=X.get('attention_mask').squeeze(1),
+                                        return_dict_in_generate=True,
+                                        output_scores=True,
+                                        max_length=10)
+                                
+                                predicted_probs = t5_get_class_probs(output, tokenizer, class_mapping)
+                            
                         elif args.backbone == 'gpt2':
                             with torch.no_grad():
                                 outputs = model(**X, output_hidden_states=True)
                             X_embedding = outputs.hidden_states[-1][:,0,:] #Represent samples as embeddings - (batch_size x embedding_dim) = (2,768)
+                            predicted_probs = outputs['logits']
                         else:
                             raise Exception("Backbone does not recognized!")
 
@@ -390,11 +460,11 @@ if __name__ == "__main__":
             
                         
                         y_gt += y
-                        y_pred += torch.argmax(outputs['logits'], axis=1)
+                        y_pred += torch.argmax(predicted_probs, axis=1)
                         y_prec_from_concepts += torch.argmax(pred, axis=1)
                     
                     y_gt, y_pred, y_prec_from_concepts = torch.stack(y_gt).int(), torch.stack(y_pred).int(), torch.stack(y_prec_from_concepts).int()
-                    score2 = n(y_gt, y_pred, y_prec_from_concepts, outputs['logits'].shape[1])
+                    score2 = n(y_gt, y_pred, y_prec_from_concepts, predicted_probs.shape[1])
 
 
 

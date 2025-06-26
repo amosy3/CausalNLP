@@ -5,12 +5,12 @@ def tokenize_text(text, tokenizer):
     return inputs
 
 class TokenizedDataset(Dataset):
-    def __init__(self, dataframe, tokenizer, model='gpt2'):
+    def __init__(self, dataframe, tokenizer, text_col, target_col, model='gpt2'):
         self.dataframe = dataframe
-        self.text = dataframe['CV_statement'].tolist()  # Select text columns
+        self.text = dataframe[text_col].tolist()  # Select text columns
         if model == 't5':
             self.text = [f'classify: Rate the employee as 0 (Regular), 1 (Good), or 2 (Exceptional): {text}' for text in self.text]
-        self.labels = dataframe['Good_Employee'].tolist()  # Select labels columns
+        self.labels = dataframe[target_col].tolist()  # Select labels columns
         self.tokenizer = tokenizer
         
     def __len__(self):
