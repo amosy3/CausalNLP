@@ -346,15 +346,58 @@ if __name__ == "__main__":
                 optimizer.step()
                 running_loss += loss.item()
             print('Epoch: %s Cross entropy loss = %s' % (i,running_loss))    
-
+            
         concept2idx = dict()
         for c in concepts:
             concept2idx[c] = [i for (i,n) in enumerate(cavs_names) if c in n]
 
+
+
+        # Calculate mebeddings ounce to reduce computation inside the shaply values iterations
+        cached_embeddings = []
+        cached_probs = []
+
+
+        for X, y in estimate_cf_loader:
+            X, y = X.to(device), y.to(device)
+            proj_matrix = proj_matrix.to(device)
+
+            if args.backbone == 't5':
+                with torch.no_grad():
+                    encoder_outputs = model.encoder(
+                        input_ids=X['input_ids'],
+                        attention_mask=X.get('attention_mask'),
+                        output_hidden_states=True,
+                        return_dict=True
+                    )
+                X_embedding = encoder_outputs[0][:,0,:]
+                
+                with torch.no_grad():
+                    output = model.generate(input_ids=X['input_ids'],
+                            attention_mask=X.get('attention_mask').squeeze(1),
+                            return_dict_in_generate=True,
+                            output_scores=True,
+                            max_length=10)
+                    
+                    predicted_probs = t5_get_class_probs(output, tokenizer, class_mapping)
+                    
+            elif args.backbone == 'gpt2':
+                with torch.no_grad():
+                    outputs = model(**X, output_hidden_states=True)
+                X_embedding = outputs.hidden_states[-1][:,0,:] #Represent samples as embeddings - (batch_size x embedding_dim) = (2,768)
+                predicted_probs = outputs['logits']
+            else:
+                raise Exception("Backbone does not recognized!")
+
+            cached_embeddings.append(X_embedding)
+            cached_probs.append(predicted_probs)
+
+
         for tested_concept in tqdm(concepts):
+            print(tested_concept)
             exclude = [x for x in concepts if x != tested_concept]
             subsets = list(powerset(list(exclude)))
-            sum = 0
+            concept_sum = 0
             for subset in subsets[3:]:
                 # score 1:
                 concept_name_list = subset + [tested_concept]
@@ -366,36 +409,38 @@ if __name__ == "__main__":
                         @ filtered_concepts_matrix.T
                 
                 y_gt, y_pred, y_prec_from_concepts = [], [], []
-                for X, y in estimate_cf_loader:
-                    X, y = X.to(device), y.to(device)
+                for X_embedding, predicted_probs, (X, y) in zip(cached_embeddings, cached_probs, estimate_cf_loader):
+                    X_embedding, predicted_probs = X_embedding.to(device), predicted_probs.to(device)
                     proj_matrix = proj_matrix.to(device)
+                    y = y.to(device)
+                #     proj_matrix = proj_matrix.to(device)
 
-                    if args.backbone == 't5':
-                        with torch.no_grad():
-                            encoder_outputs = model.encoder(
-                                input_ids=X['input_ids'],
-                                attention_mask=X.get('attention_mask'),
-                                output_hidden_states=True,
-                                return_dict=True
-                            )
-                        X_embedding = encoder_outputs[0][:,0,:]
+                #     if args.backbone == 't5':
+                #         with torch.no_grad():
+                #             encoder_outputs = model.encoder(
+                #                 input_ids=X['input_ids'],
+                #                 attention_mask=X.get('attention_mask'),
+                #                 output_hidden_states=True,
+                #                 return_dict=True
+                #             )
+                #         X_embedding = encoder_outputs[0][:,0,:]
                         
-                        with torch.no_grad():
-                            output = model.generate(input_ids=X['input_ids'],
-                                    attention_mask=X.get('attention_mask').squeeze(1),
-                                    return_dict_in_generate=True,
-                                    output_scores=True,
-                                    max_length=10)
+                #         with torch.no_grad():
+                #             output = model.generate(input_ids=X['input_ids'],
+                #                     attention_mask=X.get('attention_mask').squeeze(1),
+                #                     return_dict_in_generate=True,
+                #                     output_scores=True,
+                #                     max_length=10)
                             
-                            predicted_probs = t5_get_class_probs(output, tokenizer, class_mapping)
+                #             predicted_probs = t5_get_class_probs(output, tokenizer, class_mapping)
                             
-                    elif args.backbone == 'gpt2':
-                        with torch.no_grad():
-                            outputs = model(**X, output_hidden_states=True)
-                        X_embedding = outputs.hidden_states[-1][:,0,:] #Represent samples as embeddings - (batch_size x embedding_dim) = (2,768)
-                        predicted_probs = outputs['logits']
-                    else:
-                        raise Exception("Backbone does not recognized!")
+                #     elif args.backbone == 'gpt2':
+                #         with torch.no_grad():
+                #             outputs = model(**X, output_hidden_states=True)
+                #         X_embedding = outputs.hidden_states[-1][:,0,:] #Represent samples as embeddings - (batch_size x embedding_dim) = (2,768)
+                #         predicted_probs = outputs['logits']
+                #     else:
+                #         raise Exception("Backbone does not recognized!")
 
                     x = proj_matrix @ X_embedding.T #progect embedding to concept space - (embedding_dim x batch_size) = (768,2)
                     x = g(x.T) #learn a mapping (g) that maximize the performance - (batch_size x embedding_dim)
@@ -405,7 +450,7 @@ if __name__ == "__main__":
                     y_gt += y
                     y_pred += torch.argmax(predicted_probs, axis=1)
                     y_prec_from_concepts += torch.argmax(pred, axis=1)
-                
+                    
                 y_gt, y_pred, y_prec_from_concepts = torch.stack(y_gt).int(), torch.stack(y_pred).int(), torch.stack(y_prec_from_concepts).int()
                 score1 = n(y_gt, y_pred, y_prec_from_concepts, predicted_probs.shape[1])
 
@@ -423,36 +468,39 @@ if __name__ == "__main__":
                             @ filtered_concepts_matrix.T
                     
                     y_gt, y_pred, y_prec_from_concepts = [], [], []
-                    for X, y in estimate_cf_loader:
-                        X, y = X.to(device), y.to(device)
+                    for X_embedding, predicted_probs, (X, y) in zip(cached_embeddings, cached_probs, estimate_cf_loader):
+                        X_embedding, predicted_probs = X_embedding.to(device), predicted_probs.to(device)
                         proj_matrix = proj_matrix.to(device)
+                        y = y.to(device)
+                        # X, y = X.to(device), y.to(device)
+                        # proj_matrix = proj_matrix.to(device)
 
-                        if args.backbone == 't5':
-                            with torch.no_grad():
-                                encoder_outputs = model.encoder(
-                                    input_ids=X['input_ids'],
-                                    attention_mask=X.get('attention_mask'),
-                                    output_hidden_states=True,
-                                    return_dict=True
-                                )
-                            X_embedding = encoder_outputs[0][:,0,:]
+                        # if args.backbone == 't5':
+                        #     with torch.no_grad():
+                        #         encoder_outputs = model.encoder(
+                        #             input_ids=X['input_ids'],
+                        #             attention_mask=X.get('attention_mask'),
+                        #             output_hidden_states=True,
+                        #             return_dict=True
+                        #         )
+                        #     X_embedding = encoder_outputs[0][:,0,:]
                         
-                            with torch.no_grad():
-                                output = model.generate(input_ids=X['input_ids'],
-                                        attention_mask=X.get('attention_mask').squeeze(1),
-                                        return_dict_in_generate=True,
-                                        output_scores=True,
-                                        max_length=10)
+                        #     with torch.no_grad():
+                        #         output = model.generate(input_ids=X['input_ids'],
+                        #                 attention_mask=X.get('attention_mask').squeeze(1),
+                        #                 return_dict_in_generate=True,
+                        #                 output_scores=True,
+                        #                 max_length=10)
                                 
-                                predicted_probs = t5_get_class_probs(output, tokenizer, class_mapping)
+                        #         predicted_probs = t5_get_class_probs(output, tokenizer, class_mapping)
                             
-                        elif args.backbone == 'gpt2':
-                            with torch.no_grad():
-                                outputs = model(**X, output_hidden_states=True)
-                            X_embedding = outputs.hidden_states[-1][:,0,:] #Represent samples as embeddings - (batch_size x embedding_dim) = (2,768)
-                            predicted_probs = outputs['logits']
-                        else:
-                            raise Exception("Backbone does not recognized!")
+                        # elif args.backbone == 'gpt2':
+                        #     with torch.no_grad():
+                        #         outputs = model(**X, output_hidden_states=True)
+                        #     X_embedding = outputs.hidden_states[-1][:,0,:] #Represent samples as embeddings - (batch_size x embedding_dim) = (2,768)
+                        #     predicted_probs = outputs['logits']
+                        # else:
+                        #     raise Exception("Backbone does not recognized!")
 
                         x = proj_matrix @ X_embedding.T #progect embedding to concept space - (embedding_dim x batch_size) = (768,2)
                         x = g(x.T) #learn a mapping (g) that maximize the performance - (batch_size x embedding_dim)
@@ -462,6 +510,7 @@ if __name__ == "__main__":
                         y_gt += y
                         y_pred += torch.argmax(predicted_probs, axis=1)
                         y_prec_from_concepts += torch.argmax(pred, axis=1)
+                        
                     
                     y_gt, y_pred, y_prec_from_concepts = torch.stack(y_gt).int(), torch.stack(y_pred).int(), torch.stack(y_prec_from_concepts).int()
                     score2 = n(y_gt, y_pred, y_prec_from_concepts, predicted_probs.shape[1])
@@ -470,10 +519,8 @@ if __name__ == "__main__":
 
                 norm = (math.factorial(len(concepts) - len(subset) - 1) * math.factorial(len(subset))) / \
                                 math.factorial(len(concepts))
-                sum += norm * (score1.data.item() - score2.data.item())
-                
-            # print(tested_concept, sum)
-            logger.print_and_log(tested_concept, sum)
+                concept_sum += norm * (score1.data.item() - score2.data.item())
+            logger.print_and_log('%s : %s' % (tested_concept, concept_sum))
     
 
     # logger.log_object(metrics)
