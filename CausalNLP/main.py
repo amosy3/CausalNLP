@@ -351,7 +351,7 @@ if __name__ == "__main__":
         for c in concepts:
             concept2idx[c] = [i for (i,n) in enumerate(cavs_names) if c in n]
 
-        for tested_concept in concepts:
+        for tested_concept in tqdm(concepts):
             exclude = [x for x in concepts if x != tested_concept]
             subsets = list(powerset(list(exclude)))
             sum = 0

@@ -12,20 +12,34 @@ from tqdm import tqdm
 from utils import save_object
 
 class ModelWrapper(nn.Module):#object):
-    def __init__(self, model, layers):
+    def __init__(self, model, layers, backbone='gpt2'):
         super().__init__()
         # self.model = deepcopy(model)
         self.model = model
         self.intermediate_activations = {}
         self.gradients = None
+        self.backbone = backbone
 
         def save_activation(name):
             '''create specific hook by module name'''
-            def hook(module, input, output): #This hook is activated!
-                self.intermediate_activations[name] = output['last_hidden_state'].requires_grad_(True)
-            return hook
 
-        for name, module in self.model._modules.items(): #_modules.items(): named_modules():
+            def hook(module, input, output):
+                # For T5, output might not be dict, but a model output object or tensor
+                if self.backbone == 't5':
+                    out = output[0]
+                    # print(out.shape) #([2, 512, 768])
+                    self.intermediate_activations[name] = out.requires_grad_(True)
+                else:
+                    # For GPT2 and others, output is dict with 'last_hidden_state'
+                    if isinstance(output, dict) and 'last_hidden_state' in output:
+                        self.intermediate_activations[name] = output['last_hidden_state'].requires_grad_(True)
+                    else:
+                        # fallback for normal tensor output
+                        self.intermediate_activations[name] = output.requires_grad_(True)
+            return hook
+        
+        for name, module in self.model.named_modules(): #_modules.items(): named_modules():
+            # print(name)
             if name in layers:
                 # register the hook
                 module.register_forward_hook(save_activation(name))
@@ -54,7 +68,18 @@ class ModelWrapper(nn.Module):#object):
         return self
 
     def __call__(self, x):
-        self.output = self.model(**x)
+        if self.backbone == 't5':
+            # Only run the encoder to get hidden states (for embeddings this is all we need)
+            encoder_outputs = self.model.encoder(
+                input_ids=x['input_ids'],
+                attention_mask=x.get('attention_mask'),
+                output_hidden_states=True,
+                return_dict=True
+            )
+            self.output = encoder_outputs
+
+        else:
+            self.output = self.model(**x)
         return self.output
     
 
