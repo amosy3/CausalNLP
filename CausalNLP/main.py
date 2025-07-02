@@ -12,8 +12,6 @@ import torch.nn.functional as F
 # import sys
 # sys.path.append('..')
 from torch.utils.data import Dataset, DataLoader
-torch.manual_seed(42)
-torch.cuda.manual_seed_all(42)
 from tqdm import tqdm
 from dataloaders import tokenize_text, TokenizedDataset
 from tcav import *
@@ -34,10 +32,14 @@ def get_args():
     parser.add_argument("--dataset", choices=['cv', 'disease', 'violence'], default='cv')
     parser.add_argument("--use_gpu", type=str, default='0')
     parser.add_argument("--batch_size", type=int, default='2')
+    parser.add_argument("--seed", type=int, default='42')
     parser.add_argument("--load_from_dir",type=str, default='../logs/cv_tcav_gpt2/test_logs_2025-03-23_13-03-33')
 
 
     args = parser.parse_args()
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed_all(args.seed)
+
     return args
 
 def get_logits_from_text(model, tokenizer, sentences):
@@ -223,16 +225,16 @@ if __name__ == "__main__":
         
     if args.method == "tcav":
         # Organize all dataloaders
-        train_dataset = TokenizedDataset(df_train, tokenizer, text, target, model=args.backbone)
+        train_dataset = TokenizedDataset(df_train, tokenizer, text, target, args.dataset)
         train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
-        estimate_cf_dataset = TokenizedDataset(df_estimate_cf, tokenizer, text, target,model=args.backbone)
+        estimate_cf_dataset = TokenizedDataset(df_estimate_cf, tokenizer, text, target, args.dataset)
         estimate_cf_loader = DataLoader(estimate_cf_dataset, batch_size=1, shuffle=True)
 
         concept_dict = {}
         for c in concepts:
             c_vals = df_train[c].unique()
             for v in c_vals:
-                concept_dataset = TokenizedDataset(df_train[df_train[c] == v], tokenizer)
+                concept_dataset = TokenizedDataset(df_train[df_train[c] == v], tokenizer, text, target, args.dataset)
                 concept_dict['%s,%s' % (c,v)] = DataLoader(concept_dataset, batch_size=args.batch_size, shuffle=True)
         
 
@@ -242,7 +244,10 @@ if __name__ == "__main__":
             extract_layer = 'transformer' 
         elif args.backbone == 't5':
             extract_layer = 'encoder.block.11' 
-        
+        elif args.backbone == 'qwen':
+            extract_layer = 'transformer.h.31' 
+        elif args.backbone == 'deberta':
+            extract_layer = 'deberta.encoder.layer.11' 
         wmodel = ModelWrapper(model, [extract_layer], backbone=args.backbone)
         wmodel = wmodel.to(device)
         wmodel.eval()
@@ -276,10 +281,10 @@ if __name__ == "__main__":
                         
     if args.method == "ConceptShap":
 
-        train_dataset = TokenizedDataset(df_train, tokenizer, text, target, model=args.backbone)
+        train_dataset = TokenizedDataset(df_train, tokenizer, text, target, args.dataset)
         train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
 
-        estimate_cf_dataset = TokenizedDataset(df_estimate_cf, tokenizer, text, target, model=args.backbone)
+        estimate_cf_dataset = TokenizedDataset(df_estimate_cf, tokenizer, text, target, args.dataset)
         estimate_cf_loader = DataLoader(estimate_cf_dataset, batch_size=args.batch_size, shuffle=True)
 
         logfile_location = '../logs/%s_tcav_%s' % (args.dataset, args.backbone)
@@ -302,8 +307,11 @@ if __name__ == "__main__":
         if args.backbone == 't5':
             h_x = torch.nn.Linear(proj_matrix.shape[0], num_classes).to(device)
             optimizer = torch.optim.Adam(list(g.parameters()) + list(h_x.parameters()), lr=0.0001)
-        elif args.backbone == 'gpt2':
+        elif args.backbone in ('gpt2', 'qwen'):
             h_x = list(model.modules())[-1]
+            optimizer = torch.optim.Adam(g.parameters(), lr=0.0001)
+        elif args.backbone == 'deberta':
+            h_x = model.classifier
             optimizer = torch.optim.Adam(g.parameters(), lr=0.0001)
         else:
             raise Exception("Backbone does not recognized!")
@@ -327,8 +335,10 @@ if __name__ == "__main__":
                             return_dict=True
                         )
                     X_embedding = encoder_outputs[0][:,0,:] #Represent samples as embeddings - (batch_size x embedding_dim) = (2,768)
-                else:
+                elif args.backbone in ('gpt2', 'qwen', 'deberta'):
                     with torch.no_grad():
+                        if 'attention_mask' in X and X['attention_mask'].dim() == 3:
+                            X['attention_mask'] = X['attention_mask'].squeeze(1)
                         outputs = model(**X, output_hidden_states=True)
                     X_embedding = outputs.hidden_states[-1][:,0,:] #Represent samples as embeddings - (batch_size x embedding_dim) = (2,768)
 
@@ -381,8 +391,10 @@ if __name__ == "__main__":
                     
                     predicted_probs = t5_get_class_probs(output, tokenizer, class_mapping)
                     
-            elif args.backbone == 'gpt2':
+            elif args.backbone in ('gpt2', 'qwen', 'deberta'):
                 with torch.no_grad():
+                    if 'attention_mask' in X and X['attention_mask'].dim() == 3:
+                            X['attention_mask'] = X['attention_mask'].squeeze(1)
                     outputs = model(**X, output_hidden_states=True)
                 X_embedding = outputs.hidden_states[-1][:,0,:] #Represent samples as embeddings - (batch_size x embedding_dim) = (2,768)
                 predicted_probs = outputs['logits']
@@ -413,34 +425,6 @@ if __name__ == "__main__":
                     X_embedding, predicted_probs = X_embedding.to(device), predicted_probs.to(device)
                     proj_matrix = proj_matrix.to(device)
                     y = y.to(device)
-                #     proj_matrix = proj_matrix.to(device)
-
-                #     if args.backbone == 't5':
-                #         with torch.no_grad():
-                #             encoder_outputs = model.encoder(
-                #                 input_ids=X['input_ids'],
-                #                 attention_mask=X.get('attention_mask'),
-                #                 output_hidden_states=True,
-                #                 return_dict=True
-                #             )
-                #         X_embedding = encoder_outputs[0][:,0,:]
-                        
-                #         with torch.no_grad():
-                #             output = model.generate(input_ids=X['input_ids'],
-                #                     attention_mask=X.get('attention_mask').squeeze(1),
-                #                     return_dict_in_generate=True,
-                #                     output_scores=True,
-                #                     max_length=10)
-                            
-                #             predicted_probs = t5_get_class_probs(output, tokenizer, class_mapping)
-                            
-                #     elif args.backbone == 'gpt2':
-                #         with torch.no_grad():
-                #             outputs = model(**X, output_hidden_states=True)
-                #         X_embedding = outputs.hidden_states[-1][:,0,:] #Represent samples as embeddings - (batch_size x embedding_dim) = (2,768)
-                #         predicted_probs = outputs['logits']
-                #     else:
-                #         raise Exception("Backbone does not recognized!")
 
                     x = proj_matrix @ X_embedding.T #progect embedding to concept space - (embedding_dim x batch_size) = (768,2)
                     x = g(x.T) #learn a mapping (g) that maximize the performance - (batch_size x embedding_dim)
@@ -472,35 +456,6 @@ if __name__ == "__main__":
                         X_embedding, predicted_probs = X_embedding.to(device), predicted_probs.to(device)
                         proj_matrix = proj_matrix.to(device)
                         y = y.to(device)
-                        # X, y = X.to(device), y.to(device)
-                        # proj_matrix = proj_matrix.to(device)
-
-                        # if args.backbone == 't5':
-                        #     with torch.no_grad():
-                        #         encoder_outputs = model.encoder(
-                        #             input_ids=X['input_ids'],
-                        #             attention_mask=X.get('attention_mask'),
-                        #             output_hidden_states=True,
-                        #             return_dict=True
-                        #         )
-                        #     X_embedding = encoder_outputs[0][:,0,:]
-                        
-                        #     with torch.no_grad():
-                        #         output = model.generate(input_ids=X['input_ids'],
-                        #                 attention_mask=X.get('attention_mask').squeeze(1),
-                        #                 return_dict_in_generate=True,
-                        #                 output_scores=True,
-                        #                 max_length=10)
-                                
-                        #         predicted_probs = t5_get_class_probs(output, tokenizer, class_mapping)
-                            
-                        # elif args.backbone == 'gpt2':
-                        #     with torch.no_grad():
-                        #         outputs = model(**X, output_hidden_states=True)
-                        #     X_embedding = outputs.hidden_states[-1][:,0,:] #Represent samples as embeddings - (batch_size x embedding_dim) = (2,768)
-                        #     predicted_probs = outputs['logits']
-                        # else:
-                        #     raise Exception("Backbone does not recognized!")
 
                         x = proj_matrix @ X_embedding.T #progect embedding to concept space - (embedding_dim x batch_size) = (768,2)
                         x = g(x.T) #learn a mapping (g) that maximize the performance - (batch_size x embedding_dim)

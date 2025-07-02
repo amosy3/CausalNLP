@@ -79,6 +79,8 @@ class ModelWrapper(nn.Module):#object):
             self.output = encoder_outputs
 
         else:
+            if 'attention_mask' in x and x['attention_mask'].dim() == 3:
+                x['attention_mask'] = x['attention_mask'].squeeze(1)
             self.output = self.model(**x)
         return self.output
     
@@ -105,8 +107,16 @@ def get_activations(wmodel, output_dir, data_loader, concept_name, layer_names, 
     for i, data in enumerate(data_loader):
         if i == max_samples:
             break
-        data = data[0].to(device)
-        _ = wmodel(data)
+
+        # data = data[0].to(device)
+        # _ = wmodel(data)
+        inputs, _ = data  # unpack batch: (batch_dict, labels)
+        inputs = {k: v.to(device) for k, v in inputs.items()}
+        if 'attention_mask' in inputs and inputs['attention_mask'].dim() == 3:
+            inputs['attention_mask'] = inputs['attention_mask'].squeeze(1)
+
+        _ = wmodel(inputs)
+
         for l in layer_names:
             z = wmodel.intermediate_activations[l][:,0,:].clone().detach().cpu().numpy() #['last_hidden_state']
             activations[l].append(z)
@@ -233,6 +243,9 @@ def tcav_score(model, data_loader, cav, layer_name, class_list, concept, device)
     tcav_bar.set_description('Calculating tcav score for %s' % concept)
     for x, _ in tcav_bar:
         model.eval()
+        if isinstance(x, dict):
+            x = {k: v.to(device) for k, v in x.items()}
+        
         x = x.to(device)
         outputs = model(x)
         k = int(outputs['logits'].max(dim=1)[1].clone().detach().cpu().numpy())
