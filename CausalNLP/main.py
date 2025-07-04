@@ -34,6 +34,8 @@ def get_args():
     parser.add_argument("--batch_size", type=int, default='2')
     parser.add_argument("--seed", type=int, default='42')
     parser.add_argument("--load_from_dir",type=str, default='../logs/cv_tcav_gpt2/test_logs_2025-03-23_13-03-33')
+    parser.add_argument("--debug", action='store_true', default=False)
+
 
 
     args = parser.parse_args()
@@ -64,42 +66,85 @@ def get_cf_sample(concepts, current_concept, full_df, org_smaple):
         return valid_cf.sample()
 
 
+# def t5_get_class_probs(output, tokenizer, class_mapping):
+#     """
+#     Extract class probabilities from a T5 generate() output,
+#     assuming labels are single-token words.
+
+#     Args:
+#         output: the result of model.generate(..., return_dict_in_generate=True, output_scores=True)
+#         tokenizer: the tokenizer used with the T5 model
+#         class_mapping: dict mapping class names to indices, e.g. {"Regular": 0, "Good": 1, "Exceptional": 2}
+
+#     Returns:
+#         predicted_probs: Tensor of shape [batch_size, num_classes]
+#                          Each row corresponds to probabilities in the class index order.
+#     """
+
+#     # Validate and get token ID for each class label
+#     label_token_ids = {}
+#     for label in class_mapping:
+#         token_ids = tokenizer(label, add_special_tokens=False)["input_ids"]
+#         # if len(token_ids) != 1:
+#         #     raise ValueError(f"Label '{label}' must be a single token. Got tokens: {token_ids}")
+#         print(label, token_ids)
+#         label_token_ids[label] = token_ids[0]
+
+#     # Get logits of the first generated token
+#     logits = output.scores[0]  # shape: (batch_size, vocab_size)
+#     probs = F.softmax(logits, dim=-1)  # shape: (batch_size, vocab_size)
+
+#     batch_size = logits.size(0)
+#     num_classes = len(class_mapping)
+#     predicted_probs = torch.zeros(batch_size, num_classes, device=logits.device)
+
+#     # Fill probability tensor according to class index order
+#     for label, class_idx in class_mapping.items():
+#         token_id = label_token_ids[label]
+#         predicted_probs[:, class_idx] = probs[:, token_id]
+
+#     return predicted_probs
+
+
 def t5_get_class_probs(output, tokenizer, class_mapping):
     """
-    Extract class probabilities from a T5 generate() output,
-    assuming labels are single-token words.
+    Extract class probabilities from a T5 generate() output.
+    Supports:
+      - class labels that tokenize into multiple tokens (uses only first token)
+      - empty string ("") as a label (interpreted as generating nothing)
 
     Args:
-        output: the result of model.generate(..., return_dict_in_generate=True, output_scores=True)
-        tokenizer: the tokenizer used with the T5 model
-        class_mapping: dict mapping class names to indices, e.g. {"Regular": 0, "Good": 1, "Exceptional": 2}
+        output: result of model.generate(..., return_dict_in_generate=True, output_scores=True)
+        tokenizer: tokenizer used with the T5 model
+        class_mapping: dict like {"": 0, "1": 1, "2": 2}
 
     Returns:
-        predicted_probs: Tensor of shape [batch_size, num_classes]
-                         Each row corresponds to probabilities in the class index order.
+        predicted_probs: Tensor [batch_size, num_classes]
     """
+    batch_size = output.sequences.shape[0]
+    vocab_size = output.scores[0].shape[1]
+    num_classes = len(class_mapping)
+    predicted_probs = torch.zeros(batch_size, num_classes, device=output.scores[0].device)
 
-    # Validate and get token ID for each class label
+    # Tokenize class labels (use only the first token for each label)
     label_token_ids = {}
     for label in class_mapping:
         token_ids = tokenizer(label, add_special_tokens=False)["input_ids"]
-        # if len(token_ids) != 1:
-        #     raise ValueError(f"Label '{label}' must be a single token. Got tokens: {token_ids}")
-        # print(label, token_ids)
-        label_token_ids[label] = token_ids[0]
+        label_token_ids[label] = token_ids[0] if token_ids else None  # None means empty string
 
-    # Get logits of the first generated token
+    # First token logits from generated output
     logits = output.scores[0]  # shape: (batch_size, vocab_size)
     probs = F.softmax(logits, dim=-1)  # shape: (batch_size, vocab_size)
 
-    batch_size = logits.size(0)
-    num_classes = len(class_mapping)
-    predicted_probs = torch.zeros(batch_size, num_classes, device=logits.device)
-
-    # Fill probability tensor according to class index order
     for label, class_idx in class_mapping.items():
         token_id = label_token_ids[label]
-        predicted_probs[:, class_idx] = probs[:, token_id]
+        if token_id is None:
+            # Handle empty string: check if decoded output is empty
+            for i in range(batch_size):
+                decoded = tokenizer.decode(output.sequences[i], skip_special_tokens=True).strip()
+                predicted_probs[i, class_idx] = 1.0 if decoded == "" else 0.0
+        else:
+            predicted_probs[:, class_idx] = probs[:, token_id]
 
     return predicted_probs
 
@@ -113,7 +158,7 @@ if __name__ == "__main__":
     logger.log_object(args, 'args')
     device = "cuda:%s" % args.use_gpu
 
-    model, tokenizer = get_model(args.backbone)
+    model, tokenizer = get_model(args.backbone, dataset=args.dataset)
 
     if args.method == "train_model":
         
@@ -151,7 +196,7 @@ if __name__ == "__main__":
         exit()
 
     # load model weights
-    model, tokenizer = get_model(args.backbone, ckpt='../pretrain_models/%s' % args.backbone)
+    model, tokenizer = get_model(args.backbone, dataset=args.dataset, ckpt='../pretrain_models/%s' % args.backbone)
     model.eval()
 
     # load data
@@ -172,6 +217,7 @@ if __name__ == "__main__":
     elif args.dataset == 'disease':
         concepts = ['Dizzy', 'Sensitivity_to_Light','Headache','Nasal_Congestion', 'Facial_Pain_Pressure','Fever','General_Weakness']
         text = 'Patient_consultation'
+        target = 'Golden_Label'
         class_mapping = {"": 0, "1": 1, "2": 2}
         num_classes = 3
 
@@ -179,6 +225,7 @@ if __name__ == "__main__":
     elif  args.dataset == 'violence':
         concepts = ['Gender', 'Age_group', 'Race', 'Years_As_Nurse', 'License_Type', 'Department','Activity_At_Work']
         text = 'Dialogue'
+        target = 'Violence'
         class_mapping = {"No": 0, "Verb": 1, "Physical": 2}
         num_classes = 3
 
@@ -252,7 +299,7 @@ if __name__ == "__main__":
         wmodel = wmodel.to(device)
         wmodel.eval()
         
-        scorer = TCAV(wmodel, estimate_cf_loader, concept_dict, df_train["Good_Employee"].unique(), 2, device, logger.log_dir)
+        scorer = TCAV(wmodel, estimate_cf_loader, concept_dict, df_train[target].unique(), 2, device, logger.log_dir)
         print('Generating concepts...')
         scorer.generate_activations([extract_layer])
         scorer.load_activations()
@@ -319,8 +366,8 @@ if __name__ == "__main__":
         model = model.to(device)        
         model.float()
         
-
-        for i in range(10):
+        epochs = 1 if args.debug else 10
+        for i in range(epochs):
             running_loss = 0.0
             for X, y in tqdm(train_loader):
                 X = X.to(device)
