@@ -25,7 +25,7 @@ class ModelWrapper(nn.Module):#object):
 
             def hook(module, input, output):
                 # For T5, output might not be dict, but a model output object or tensor
-                if self.backbone == 't5':
+                if self.backbone in ('t5','qwen'):
                     out = output[0]
                     # print(out.shape) #([2, 512, 768])
                     self.intermediate_activations[name] = out.requires_grad_(True)

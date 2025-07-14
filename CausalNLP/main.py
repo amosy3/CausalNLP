@@ -66,46 +66,6 @@ def get_cf_sample(concepts, current_concept, full_df, org_smaple):
         return valid_cf.sample()
 
 
-# def t5_get_class_probs(output, tokenizer, class_mapping):
-#     """
-#     Extract class probabilities from a T5 generate() output,
-#     assuming labels are single-token words.
-
-#     Args:
-#         output: the result of model.generate(..., return_dict_in_generate=True, output_scores=True)
-#         tokenizer: the tokenizer used with the T5 model
-#         class_mapping: dict mapping class names to indices, e.g. {"Regular": 0, "Good": 1, "Exceptional": 2}
-
-#     Returns:
-#         predicted_probs: Tensor of shape [batch_size, num_classes]
-#                          Each row corresponds to probabilities in the class index order.
-#     """
-
-#     # Validate and get token ID for each class label
-#     label_token_ids = {}
-#     for label in class_mapping:
-#         token_ids = tokenizer(label, add_special_tokens=False)["input_ids"]
-#         # if len(token_ids) != 1:
-#         #     raise ValueError(f"Label '{label}' must be a single token. Got tokens: {token_ids}")
-#         print(label, token_ids)
-#         label_token_ids[label] = token_ids[0]
-
-#     # Get logits of the first generated token
-#     logits = output.scores[0]  # shape: (batch_size, vocab_size)
-#     probs = F.softmax(logits, dim=-1)  # shape: (batch_size, vocab_size)
-
-#     batch_size = logits.size(0)
-#     num_classes = len(class_mapping)
-#     predicted_probs = torch.zeros(batch_size, num_classes, device=logits.device)
-
-#     # Fill probability tensor according to class index order
-#     for label, class_idx in class_mapping.items():
-#         token_id = label_token_ids[label]
-#         predicted_probs[:, class_idx] = probs[:, token_id]
-
-#     return predicted_probs
-
-
 def t5_get_class_probs(output, tokenizer, class_mapping):
     """
     Extract class probabilities from a T5 generate() output.
@@ -292,7 +252,7 @@ if __name__ == "__main__":
         elif args.backbone == 't5':
             extract_layer = 'encoder.block.11' 
         elif args.backbone == 'qwen':
-            extract_layer = 'transformer.h.31' 
+            extract_layer = 'base_model.model.model.layers.27' #'transformer.h.31' 
         elif args.backbone == 'deberta':
             extract_layer = 'deberta.encoder.layer.11' 
         wmodel = ModelWrapper(model, [extract_layer], backbone=args.backbone)
@@ -346,15 +306,15 @@ if __name__ == "__main__":
 
         proj_matrix = proj_matrix.to(device)
 
-        
+        g_size = proj_matrix.shape[0]
         # Optimize prediction from the concept space
-        g = G(768,768,768)
+        g = G(g_size,g_size,g_size)
         g = g.to(device)
         
-        if args.backbone == 't5':
+        if args.backbone in ('t5', 'qwen'):
             h_x = torch.nn.Linear(proj_matrix.shape[0], num_classes).to(device)
             optimizer = torch.optim.Adam(list(g.parameters()) + list(h_x.parameters()), lr=0.0001)
-        elif args.backbone in ('gpt2', 'qwen'):
+        elif args.backbone in ('gpt2'):
             h_x = list(model.modules())[-1]
             optimizer = torch.optim.Adam(g.parameters(), lr=0.0001)
         elif args.backbone == 'deberta':
@@ -388,7 +348,7 @@ if __name__ == "__main__":
                             X['attention_mask'] = X['attention_mask'].squeeze(1)
                         outputs = model(**X, output_hidden_states=True)
                     X_embedding = outputs.hidden_states[-1][:,0,:] #Represent samples as embeddings - (batch_size x embedding_dim) = (2,768)
-
+                # print(X_embedding.shape, proj_matrix.shape)
                 x = proj_matrix @ X_embedding.T #progect embedding to concept space - (embedding_dim x batch_size) = (768,2)
                 x = g(x.T) #learn a mapping (g) that maximize the performance - (batch_size x embedding_dim)
                 pred = h_x(x) #feed to original last layer - (batch_size x 3) = (2,3)
@@ -513,7 +473,6 @@ if __name__ == "__main__":
                         y_pred += torch.argmax(predicted_probs, axis=1)
                         y_prec_from_concepts += torch.argmax(pred, axis=1)
                         
-                    
                     y_gt, y_pred, y_prec_from_concepts = torch.stack(y_gt).int(), torch.stack(y_pred).int(), torch.stack(y_prec_from_concepts).int()
                     score2 = n(y_gt, y_pred, y_prec_from_concepts, predicted_probs.shape[1])
 

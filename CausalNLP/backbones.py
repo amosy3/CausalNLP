@@ -1,13 +1,25 @@
 from transformers import DebertaTokenizer, DebertaForSequenceClassification, DebertaConfig
 from transformers import GPT2Tokenizer, GPT2ForSequenceClassification, GPT2Config
 from transformers import AutoTokenizer, AutoModelForSequenceClassification, AutoModel, AutoModelForSeq2SeqLM
+from transformers import AutoModelForCausalLM, AutoTokenizer, Qwen2ForCausalLM
+from peft import PeftModel
 
 import torch
 from torch import nn
 
 
+def get_model(model_name='gpt2', dataset='cv', ckpt=None):
 
-def get_model(model_name='gpt2', ckpt=None):
+    if dataset == 'cv':
+        dateset_pre = 'CV'
+    elif dataset == 'disease':
+        dateset_pre = 'Disease'
+    elif dataset == 'violence':
+        dateset_pre = 'Violence'
+    else:
+        raise "Backbone was not found."
+    
+
     if model_name == 'gpt2':
         tokenizer = GPT2Tokenizer.from_pretrained(model_name)
 
@@ -18,16 +30,23 @@ def get_model(model_name='gpt2', ckpt=None):
             model = GPT2ForSequenceClassification.from_pretrained(ckpt, num_labels=3)
 
     elif model_name == 'qwen':
-        tokenizer = AutoTokenizer.from_pretrained("GilatToker/CV_Qwen")
-        model = AutoModel.from_pretrained("GilatToker/CV_Qwen")
+        # tokenizer = AutoTokenizer.from_pretrained("GilatToker/CV_Qwen")
+        # model = AutoModel.from_pretrained("GilatToker/CV_Qwen")  
+
+        tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-1.5B-Instruct", trust_remote_code=True)
+        #tokenizer = AutoTokenizer.from_pretrained("../pretrain_models/Trained_models/%s/model" % dateset_pre, trust_remote_code=True)
+
+        base_model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2.5-1.5B-Instruct", trust_remote_code=True)
+        model = PeftModel.from_pretrained(base_model, "../pretrain_models/Trained_models/%s/model"% dateset_pre)
+
 
     elif model_name == 't5':
-        tokenizer = AutoTokenizer.from_pretrained("GilatToker/CV_T5")
-        model = AutoModelForSeq2SeqLM.from_pretrained("GilatToker/CV_T5")
+        tokenizer = AutoTokenizer.from_pretrained("GilatToker/%s_T5" % dateset_pre)
+        model = AutoModelForSeq2SeqLM.from_pretrained("GilatToker/%s_T5" % dateset_pre)
 
     elif model_name == 'deberta':
-        tokenizer = AutoTokenizer.from_pretrained("GilatToker/CV_Deberta")
-        model = AutoModelForSequenceClassification.from_pretrained("GilatToker/CV_Deberta")
+        tokenizer = AutoTokenizer.from_pretrained("GilatToker/%s_Deberta"% dateset_pre)
+        model = AutoModelForSequenceClassification.from_pretrained("GilatToker/%s_Deberta" % dateset_pre)
 
         # model_name = "microsoft/deberta-base"
         # tokenizer = DebertaTokenizer.from_pretrained(model_name)
