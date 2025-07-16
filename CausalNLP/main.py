@@ -362,6 +362,11 @@ if __name__ == "__main__":
                 loss.backward()
                 optimizer.step()
                 running_loss += loss.item()
+
+                if args.debug:
+                    break
+            if args.debug:
+                break
             print('Epoch: %s Cross entropy loss = %s' % (i,running_loss))    
             
         concept2idx = dict()
@@ -370,14 +375,14 @@ if __name__ == "__main__":
 
 
 
-        # Calculate mebeddings ounce to reduce computation inside the shaply values iterations
+        # Calculate ebeddings ounce to reduce computation inside the shaply values iterations
+        print("Start Calulate embeddings")
         cached_embeddings = []
         cached_probs = []
+        cached_y = []
 
-
-        for X, y in estimate_cf_loader:
+        for X, y in tqdm(estimate_cf_loader):
             X, y = X.to(device), y.to(device)
-            proj_matrix = proj_matrix.to(device)
 
             if args.backbone == 't5':
                 with torch.no_grad():
@@ -408,16 +413,17 @@ if __name__ == "__main__":
             else:
                 raise Exception("Backbone does not recognized!")
 
-            cached_embeddings.append(X_embedding)
-            cached_probs.append(predicted_probs)
+            cached_embeddings.append(X_embedding.detach().cpu())
+            cached_probs.append(predicted_probs.detach().cpu())
+            cached_y.append(y.detach().cpu())
 
-
+        print("Done compute embeddings. Start compute Shaply Values.")
         for tested_concept in tqdm(concepts):
             print(tested_concept)
             exclude = [x for x in concepts if x != tested_concept]
             subsets = list(powerset(list(exclude)))
             concept_sum = 0
-            for subset in subsets[3:]:
+            for subset in tqdm(subsets[3:]):
                 # score 1:
                 concept_name_list = subset + [tested_concept]
                 nested_indices = [concept2idx[concept_name] for concept_name in concept_name_list]
@@ -426,12 +432,11 @@ if __name__ == "__main__":
                 filtered_concepts_matrix = concepts_matrix[:,index_tensor]
                 proj_matrix = (filtered_concepts_matrix @ torch.inverse((filtered_concepts_matrix.T @ filtered_concepts_matrix))) \
                         @ filtered_concepts_matrix.T
+                proj_matrix = proj_matrix.to(device)
                 
                 y_gt, y_pred, y_prec_from_concepts = [], [], []
-                for X_embedding, predicted_probs, (X, y) in zip(cached_embeddings, cached_probs, estimate_cf_loader):
-                    X_embedding, predicted_probs = X_embedding.to(device), predicted_probs.to(device)
-                    proj_matrix = proj_matrix.to(device)
-                    y = y.to(device)
+                for X_embedding, predicted_probs,  y in zip(cached_embeddings, cached_probs, cached_y):
+                    X_embedding, predicted_probs, y = X_embedding.to(device), predicted_probs.to(device), y.to(device)
 
                     x = proj_matrix @ X_embedding.T #progect embedding to concept space - (embedding_dim x batch_size) = (768,2)
                     x = g(x.T) #learn a mapping (g) that maximize the performance - (batch_size x embedding_dim)
@@ -457,17 +462,15 @@ if __name__ == "__main__":
                     filtered_concepts_matrix = concepts_matrix[:,index_tensor]
                     proj_matrix = (filtered_concepts_matrix @ torch.inverse((filtered_concepts_matrix.T @ filtered_concepts_matrix))) \
                             @ filtered_concepts_matrix.T
-                    
+                    proj_matrix = proj_matrix.to(device)
+
                     y_gt, y_pred, y_prec_from_concepts = [], [], []
-                    for X_embedding, predicted_probs, (X, y) in zip(cached_embeddings, cached_probs, estimate_cf_loader):
-                        X_embedding, predicted_probs = X_embedding.to(device), predicted_probs.to(device)
-                        proj_matrix = proj_matrix.to(device)
-                        y = y.to(device)
+                    for X_embedding, predicted_probs, y in zip(cached_embeddings, cached_probs, cached_y):
+                        X_embedding, predicted_probs, y = X_embedding.to(device), predicted_probs.to(device), y.to(device)
 
                         x = proj_matrix @ X_embedding.T #progect embedding to concept space - (embedding_dim x batch_size) = (768,2)
                         x = g(x.T) #learn a mapping (g) that maximize the performance - (batch_size x embedding_dim)
                         pred = h_x(x) #feed to original last layer - (batch_size x 3) = (2,3)
-            
                         
                         y_gt += y
                         y_pred += torch.argmax(predicted_probs, axis=1)
